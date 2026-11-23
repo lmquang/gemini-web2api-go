@@ -74,6 +74,8 @@ const (
 
 // ModelConfig holds the server-side model id plus the legacy MODE_CATEGORY value.
 type ModelConfig struct {
+	requestContext context.Context
+
 	// HexID 走 x-goog-ext-525001261-jspb header，是服务端唯一认的模型开关。
 	// 实测：不发这个 header 时 inner[79] 取 1..6 全部落到 3.5 Flash-Lite；
 	// header 写 3.6 而 inner[79] 写 6 时拿到的是 3.6 —— header 压过 inner[79]。
@@ -122,6 +124,24 @@ type ConvRef struct {
 
 // thinkWire 返回思考档线值（填 header 下标15 / inner[80]）：ThinkWire 显式指定优先，
 // 否则 Thinking→扩展(2)、默认普通(1)。对现有模型取值跟旧的 normal/extended 逐字一致。
+func waitForGenerationRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return ctx.Err()
+	}
+}
+
+func (mc ModelConfig) generationContext() context.Context {
+	if mc.requestContext != nil {
+		return mc.requestContext
+	}
+	return context.Background()
+}
+
 func (mc ModelConfig) thinkWire() int {
 	if mc.ThinkWire > 0 {
 		return mc.ThinkWire
@@ -860,6 +880,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		Cookie: cookieStr, SAPISID: sapisid, AuthUser: authUser,
 	}
 	for attempt := 0; attempt < rtCfg().RetryAttempts; attempt++ {
+		if err := mc.generationContext().Err(); err != nil {
+			return attrib(err)
+		}
 		var statusCode int
 		var raw []byte
 		var ttfb int64
@@ -869,7 +892,10 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			wcReq.Cookie = cookieStr
 			statusCode, raw, ttfb, setCookie, err = doWebChannelRequest(wcReq, proxyURL, lineCB)
 		} else {
-			statusCode, raw, ttfb, setCookie, err = doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB)
+			statusCode, raw, ttfb, setCookie, err = doGeminiRequest(mc.generationContext(), endpoint, body, geminiHeaders, proxyURL, lineCB)
+		}
+		if err := mc.generationContext().Err(); err != nil {
+			return attrib(err)
 		}
 		if len(setCookie) > 0 && cookieID > 0 {
 			if merged := mergeSetCookie(cookieStr, setCookie); merged != cookieStr {
@@ -904,7 +930,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			}
 			if attempt < rtCfg().RetryAttempts-1 {
 				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, err)
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
+				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
+					return attrib(err)
+				}
 			}
 			continue
 		}
@@ -933,7 +961,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 				break
 			}
 			if attempt < rtCfg().RetryAttempts-1 {
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
+				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
+					return attrib(err)
+				}
 			}
 			continue
 		}
@@ -961,7 +991,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			}
 			if attempt < rtCfg().RetryAttempts-1 {
 				logf("retry %d/%d: 空响应（无内容帧，%d 字节）", attempt+1, rtCfg().RetryAttempts, len(raw))
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
+				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
+					return attrib(err)
+				}
 			}
 			continue
 		}
@@ -973,7 +1005,9 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			}
 			if attempt < rtCfg().RetryAttempts-1 {
 				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, lastErr)
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
+				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
+					return attrib(err)
+				}
 			}
 			continue
 		}
@@ -1117,13 +1151,13 @@ func setAuthUserHeaders(h map[string]string, authuser int) {
 // 返回值多了 setCookie：服务端几乎每个响应都在刷新 SIDCC / __Secure-1PSIDCC /
 // __Secure-3PSIDCC，浏览器收下再带回去。一直发旧值的客户端会被判定为过期会话，
 // 实测号活一两小时就失效 —— 所以这些必须收下来并写回账号。
-func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL string,
+func doGeminiRequest(ctx context.Context, endpoint, body string, headers map[string]string, proxyURL string,
 	onLine func(string) error) (int, []byte, int64, []string, error) {
 	sendAt := time.Now()
 	idle := time.Duration(rtCfg().StreamIdleTimeoutSec) * time.Second
 	if proxyURL != "" {
 		// 走 stdlib 的 http.ProxyURL，已知能过 socks5/socks5h。
-		req, err := http.NewRequest("POST", endpoint, strings.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(body))
 		if err != nil {
 			return 0, nil, 0, nil, err
 		}
@@ -1145,7 +1179,7 @@ func doGeminiRequest(endpoint, body string, headers map[string]string, proxyURL 
 	}
 
 	// 直连 → tls-client，保留 chrome146 TLS/HTTP2 真指纹
-	req, err := fhttp.NewRequest("POST", endpoint, strings.NewReader(body))
+	req, err := fhttp.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(body))
 	if err != nil {
 		return 0, nil, 0, nil, err
 	}

@@ -114,7 +114,10 @@ func TestGeminiHandlerContinuesToolHistoryWithoutCallIDs(t *testing.T) {
 		t.Errorf("third turn dropped final user message: %s", prompts[2])
 	}
 	for i := 1; i < len(prompts); i++ {
-		for _, old := range []string{"original-gemini-question", "stable-gemini-system", "Available tools"} {
+		if !strings.Contains(prompts[i], "Available tools") {
+			t.Errorf("turn %d lost current tool schemas", i+1)
+		}
+		for _, old := range []string{"original-gemini-question", "stable-gemini-system"} {
 			if strings.Contains(prompts[i], old) {
 				t.Errorf("turn %d resent old context %q: %s", i+1, old, prompts[i])
 			}

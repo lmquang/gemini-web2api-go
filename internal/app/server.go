@@ -223,6 +223,7 @@ func recordRequest(endpoint, model, prompt, response string, res *StreamResult, 
 }
 
 func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	requestStart := time.Now()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSON(w, 400, map[string]interface{}{"error": map[string]string{"message": err.Error()}})
@@ -244,6 +245,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	modelCfg.requestContext = r.Context()
 	messagesRaw, _ := req["messages"].([]interface{})
 	var messages []map[string]interface{}
 	for _, m := range messagesRaw {
@@ -298,6 +300,19 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var ka *streamKeepalive
 	if stream {
 		sse = newSSEWriter(w, cid, created, modelName)
+		defer func() {
+			elapsed := func(at time.Time) int64 {
+				if at.IsZero() {
+					return -1
+				}
+				return at.Sub(requestStart).Milliseconds()
+			}
+			var fenceAt time.Time
+			if gate != nil {
+				fenceAt = gate.firstClosedFenceAt
+			}
+			logf("[chat-stream] id=%s tools=%d first_content_ms=%d first_reasoning_sent_ms=%d first_tool_fence_closed_ms=%d first_tool_sent_ms=%d total_ms=%d canceled=%t", cid, len(tools), elapsed(sse.firstContentAt), elapsed(sse.firstReasoningAt), elapsed(fenceAt), elapsed(sse.firstToolAt), time.Since(requestStart).Milliseconds(), r.Context().Err() != nil)
+		}()
 		onReasoning = sse.SendReasoning
 		if len(tools) == 0 {
 			onDelta = sse.SendContent
@@ -476,6 +491,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	modelCfg.requestContext = r.Context()
 	messages := responsesToMessages(req)
 
 	toolsRaw, _ := req["tools"].([]interface{})

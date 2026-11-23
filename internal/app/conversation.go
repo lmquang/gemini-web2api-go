@@ -226,6 +226,14 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 		return &StreamResult{}, slotErr
 	}
 	defer releaseSlot(p.ID)
+	return generateConversationOnSlot(prompt, mc, conv, onDelta, onReasoning, p)
+}
+
+// generateConversationOnSlot is the upstream seam for HTTP lifecycle tests.
+var generateConversationOnSlot = streamGenerateConvOnSlot
+
+func streamGenerateConvOnSlot(prompt string, mc ModelConfig, conv *convState,
+	onDelta, onReasoning func(string), p Proxy) (*StreamResult, error) {
 	proxyURL := p.URL
 	pickedOK := p.ID > 0
 
@@ -348,7 +356,10 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 	t0 := time.Now()
 	var lastErr error
 	for attempt := 0; attempt < rtCfg().RetryAttempts; attempt++ {
-		statusCode, raw, ttfb, setCookie, err := doGeminiRequest(endpoint, body, geminiHeaders, proxyURL, lineCB)
+		statusCode, raw, ttfb, setCookie, err := doGeminiRequest(mc.generationContext(), endpoint, body, geminiHeaders, proxyURL, lineCB)
+		if err := mc.generationContext().Err(); err != nil {
+			return nil, err
+		}
 		if len(setCookie) > 0 && conv.cookie != "" {
 			if merged := mergeSetCookie(conv.cookie, setCookie); merged != conv.cookie {
 				conv.cookie = merged
@@ -384,7 +395,9 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 				if errors.Is(err, errUpstreamFailureReply) {
 					logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, err)
 				}
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
+				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
@@ -396,7 +409,9 @@ func streamGenerateConv(prompt string, mc ModelConfig, conv *convState,
 			}
 			if attempt < rtCfg().RetryAttempts-1 {
 				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, lastErr)
-				time.Sleep(time.Duration(rtCfg().RetryDelaySec) * time.Second)
+				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
+					return nil, err
+				}
 			}
 			continue
 		}
@@ -451,12 +466,14 @@ func callGeminiConv(messages []map[string]interface{}, mc ModelConfig,
 
 	var prompt string
 	if fresh {
-		// 首轮带上 tools 指令：模型要靠它知道怎么吐 tool_call 围栏，续接轮不再重发
-		//（指令已在服务端首轮历史里）。
+		// A fresh conversation receives the full history and current tool contract.
 		prompt, _ = messagesToPrompt(messages, tools, toolChoice)
 		logf("[conv] 新会话，首轮发 %d 字节（tools=%d）", len(prompt), len(tools))
 	} else {
-		prompt = buildPrompt(messages[prefixLen:], nil, nil)
+		// Tool availability belongs to this request, not to remembered upstream
+		// history. Re-anchor the schemas and execution format on every tool turn;
+		// otherwise a short continuation can lose the tool contract entirely.
+		prompt = buildPrompt(messages[prefixLen:], tools, toolChoice)
 		logf("[conv] 续接命中 turn=%d，只发 %d 字节（新增 %d 条消息，历史留服务端）", conv.turn, len(prompt), len(messages)-prefixLen)
 	}
 

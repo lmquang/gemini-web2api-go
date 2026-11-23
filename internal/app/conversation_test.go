@@ -262,7 +262,12 @@ func TestCallGeminiConvSendsAllNewToolAndUserMessages(t *testing.T) {
 			t.Errorf("continuation dropped %q: %s", want, prompts[1])
 		}
 	}
-	for _, old := range []string{"stable-system", "original-question", "Available tools"} {
+	for _, want := range []string{"Available tools", "ONLY execution channel", `"name": "read_file"`} {
+		if !strings.Contains(prompts[1], want) {
+			t.Errorf("continuation lost current tool contract %q", want)
+		}
+	}
+	for _, old := range []string{"stable-system", "original-question"} {
 		if strings.Contains(prompts[1], old) {
 			t.Errorf("continuation resent old context %q", old)
 		}

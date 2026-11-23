@@ -199,7 +199,10 @@ func TestResponsesHandlerToolReplayContinuesConversation(t *testing.T) {
 			t.Errorf("continuation dropped %q: %s", want, prompts[1])
 		}
 	}
-	for _, old := range []string{"original-handler-question", "stable-handler-system", "Available tools"} {
+	if !strings.Contains(prompts[1], "Available tools") {
+		t.Error("continuation lost current tool schemas")
+	}
+	for _, old := range []string{"original-handler-question", "stable-handler-system"} {
 		if strings.Contains(prompts[1], old) {
 			t.Errorf("continuation resent old context %q: %s", old, prompts[1])
 		}

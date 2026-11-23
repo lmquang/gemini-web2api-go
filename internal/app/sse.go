@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 )
 
 // sseWriter 把 chat.completion.chunk 按 OpenAI 规范的顺序写出去：
@@ -12,12 +13,15 @@ import (
 // header 是懒发的：第一次真要写 chunk 时才 WriteHeader(200)。这样上游在出第一个
 // 字之前就失败的话，还能退回正常的 502 JSON，而不是留给客户端半个流。
 type sseWriter struct {
-	w       http.ResponseWriter
-	flusher http.Flusher
-	id      string
-	created int64
-	model   string
-	started bool
+	w                http.ResponseWriter
+	flusher          http.Flusher
+	id               string
+	created          int64
+	model            string
+	started          bool
+	firstContentAt   time.Time
+	firstReasoningAt time.Time
+	firstToolAt      time.Time
 }
 
 func newSSEWriter(w http.ResponseWriter, id string, created int64, model string) *sseWriter {
@@ -75,6 +79,9 @@ func (s *sseWriter) SendReasoning(delta string) {
 	}
 	s.start()
 	s.chunk(map[string]interface{}{"reasoning_content": delta}, nil, nil)
+	if s.firstReasoningAt.IsZero() {
+		s.firstReasoningAt = time.Now()
+	}
 }
 
 func (s *sseWriter) SendContent(delta string) {
@@ -83,6 +90,9 @@ func (s *sseWriter) SendContent(delta string) {
 	}
 	s.start()
 	s.chunk(map[string]interface{}{"content": delta}, nil, nil)
+	if s.firstContentAt.IsZero() {
+		s.firstContentAt = time.Now()
+	}
 }
 
 func (s *sseWriter) SendToolCalls(tcs []ToolCall) {
@@ -102,6 +112,9 @@ func (s *sseWriter) SendToolCalls(tcs []ToolCall) {
 		}
 	}
 	s.chunk(map[string]interface{}{"tool_calls": out}, nil, nil)
+	if len(tcs) > 0 && s.firstToolAt.IsZero() {
+		s.firstToolAt = time.Now()
+	}
 }
 
 // Finish 收尾：空 delta + finish_reason，可选 usage chunk，最后 [DONE]。
