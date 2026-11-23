@@ -480,7 +480,11 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 			return res, err
 		}
 		res, err = next, nextErr
-		if !retryOnAnotherAccount(res, err, mc, exclude) {
+		retry := retryOnAnotherAccount(res, err, mc, exclude)
+		if budget, ok := mc.generationContext().Value(toolResponseBudgetKey{}).(*toolResponseBudget); ok && budget.corrective {
+			return res, err
+		}
+		if !retry {
 			return res, err
 		}
 	}
@@ -879,7 +883,8 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		HexID: mc.HexID, Mode: mc.Mode, Think: mc.thinkWire(),
 		Cookie: cookieStr, SAPISID: sapisid, AuthUser: authUser,
 	}
-	for attempt := 0; attempt < rtCfg().RetryAttempts; attempt++ {
+	attemptLimit := generationRetryLimit(mc)
+	for attempt := 0; attempt < attemptLimit; attempt++ {
 		if err := mc.generationContext().Err(); err != nil {
 			return attrib(err)
 		}
@@ -890,7 +895,7 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 		var err error
 		if useWC {
 			wcReq.Cookie = cookieStr
-			statusCode, raw, ttfb, setCookie, err = doWebChannelRequest(wcReq, proxyURL, lineCB)
+			statusCode, raw, ttfb, setCookie, err = doWebChannelRequest(mc.generationContext(), wcReq, proxyURL, lineCB)
 		} else {
 			statusCode, raw, ttfb, setCookie, err = doGeminiRequest(mc.generationContext(), endpoint, body, geminiHeaders, proxyURL, lineCB)
 		}
@@ -928,8 +933,8 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 				logf("上游超时，retry_on_timeout 关着，不再重试: %v", err)
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
-				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, err)
+			if attempt < attemptLimit-1 {
+				logf("retry %d/%d: %v", attempt+1, attemptLimit, err)
 				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
 					return attrib(err)
 				}
@@ -960,7 +965,7 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
+			if attempt < attemptLimit-1 {
 				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
 					return attrib(err)
 				}
@@ -989,8 +994,8 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
-				logf("retry %d/%d: 空响应（无内容帧，%d 字节）", attempt+1, rtCfg().RetryAttempts, len(raw))
+			if attempt < attemptLimit-1 {
+				logf("retry %d/%d: 空响应（无内容帧，%d 字节）", attempt+1, attemptLimit, len(raw))
 				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
 					return attrib(err)
 				}
@@ -1003,8 +1008,8 @@ func streamGenerateOnce(prompt, latest string, mc ModelConfig, pending []pending
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
-				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, lastErr)
+			if attempt < attemptLimit-1 {
+				logf("retry %d/%d: %v", attempt+1, attemptLimit, lastErr)
 				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
 					return attrib(err)
 				}
@@ -1171,7 +1176,8 @@ func doGeminiRequest(ctx context.Context, endpoint, body string, headers map[str
 			return 0, nil, 0, nil, err
 		}
 		defer resp.Body.Close()
-		raw, ttfb, err := readBodyWithIdle(resp.Body, onLine, sendAt, idle)
+		raw, ttfb, err := readBodyWithIdle(toolValidationBody(ctx, resp.Body), onLine, sendAt, idle)
+		err = toolValidationReadError(ctx, err)
 		if err != nil {
 			return resp.StatusCode, nil, ttfb, resp.Header.Values("Set-Cookie"), err
 		}
@@ -1193,7 +1199,8 @@ func doGeminiRequest(ctx context.Context, endpoint, body string, headers map[str
 		return 0, nil, 0, nil, err
 	}
 	defer resp.Body.Close()
-	raw, ttfb, err := readBodyWithIdle(resp.Body, onLine, sendAt, idle)
+	raw, ttfb, err := readBodyWithIdle(toolValidationBody(ctx, resp.Body), onLine, sendAt, idle)
+	err = toolValidationReadError(ctx, err)
 	if err != nil {
 		return resp.StatusCode, nil, ttfb, resp.Header.Values("Set-Cookie"), err
 	}

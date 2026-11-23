@@ -132,7 +132,18 @@ func rejectUnsupported(req map[string]interface{}, messages []map[string]interfa
 
 func callGemini(prompt, latest string, mc ModelConfig, tools []map[string]interface{},
 	images []pendingUpload, onDelta, onReasoning func(string)) (string, []ToolCall, *StreamResult, error) {
-	res, err := streamGenerateWithFiles(prompt, latest, mc, images, onDelta, onReasoning)
+	return callGeminiWithPolicy(prompt, latest, mc, tools, images, onDelta, onReasoning, nil, false)
+}
+
+func callGeminiWithPolicy(prompt, latest string, mc ModelConfig, tools []map[string]interface{},
+	images []pendingUpload, onDelta, onReasoning func(string), choice interface{}, restricted bool) (string, []ToolCall, *StreamResult, error) {
+	res, err := validatedToolGeneration(mc, mc.Tool == 0 && activeClientTools(tools, choice) && !restricted, prompt, prompt, onDelta, onReasoning,
+		func(p string, m ModelConfig, corrective bool, delta, reasoning func(string)) (*StreamResult, error) {
+			if corrective {
+				latest = p
+			}
+			return generateToolRequest(p, latest, m, images, delta, reasoning)
+		})
 	if err != nil {
 		// res 非 nil：失败时它只带归属（哪个号 / 哪个出口），给 recordRequest 用
 		return "", nil, res, err
@@ -331,7 +342,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 多轮：按历史前缀识别续接，命中就只发新消息、历史留服务端。带 tools 也走这条。
 		text, toolCalls, res, err = callGeminiConv(messages, modelCfg, tools, req["tool_choice"], onDelta, onReasoning, conversationOptions{requestScope: conversationRequestScope(r, getStr(req, "prompt_cache_key"), getStr(req, "user"))})
 	} else {
-		text, toolCalls, res, err = callGemini(prompt, latest, modelCfg, tools, images, onDelta, onReasoning)
+		text, toolCalls, res, err = callGeminiWithPolicy(prompt, latest, modelCfg, tools, images, onDelta, onReasoning, req["tool_choice"], toolResultRestriction(messages))
 	}
 	ka.Stop() // 之后的收尾回到单 goroutine 写；Started() 也要在保活停下后再看
 	if err != nil {
@@ -365,7 +376,7 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}})
 			return
 		}
-		writeJSON(w, 502, map[string]interface{}{"error": map[string]string{"message": "upstream error: " + err.Error()}})
+		writeJSON(w, 502, map[string]interface{}{"error": upstreamHTTPErrorObject(err)})
 		return
 	}
 
@@ -634,7 +645,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	if rtCfg().MultiTurn && len(images) == 0 && modelCfg.Tool == 0 {
 		text, toolCalls, res, err = callGeminiConv(messages, modelCfg, tools, req["tool_choice"], onDelta, nil, conversationOptions{requestScope: conversationRequestScope(r, getStr(req, "prompt_cache_key"), getStr(req, "user"))})
 	} else {
-		text, toolCalls, res, err = callGemini(prompt, latest, modelCfg, tools, images, onDelta, nil)
+		text, toolCalls, res, err = callGeminiWithPolicy(prompt, latest, modelCfg, tools, images, onDelta, nil, req["tool_choice"], toolResultRestriction(messages))
 	}
 	ka.Stop()
 	if err != nil {
@@ -645,7 +656,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		recordRequest("responses", modelName, prompt, "", res, status, err.Error(), stream)
 		if stream {
-			errObj := map[string]string{"message": err.Error()}
+			errObj := upstreamErrorObject(err)
 			if downgraded {
 				errObj["code"] = "model_downgraded"
 			}
@@ -681,7 +692,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			}})
 			return
 		}
-		writeJSON(w, 502, map[string]interface{}{"error": map[string]string{"message": "upstream error: " + err.Error()}})
+		writeJSON(w, 502, map[string]interface{}{"error": upstreamHTTPErrorObject(err)})
 		return
 	}
 
@@ -783,3 +794,6 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		"usage":      buildUsage(prompt, text, true),
 	})
 }
+
+// generateToolRequest is the single-turn upstream seam for recovery tests.
+var generateToolRequest = streamGenerateWithFiles

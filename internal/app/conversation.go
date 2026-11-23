@@ -355,7 +355,8 @@ func streamGenerateConvOnSlot(prompt string, mc ModelConfig, conv *convState,
 
 	t0 := time.Now()
 	var lastErr error
-	for attempt := 0; attempt < rtCfg().RetryAttempts; attempt++ {
+	attemptLimit := generationRetryLimit(mc)
+	for attempt := 0; attempt < attemptLimit; attempt++ {
 		statusCode, raw, ttfb, setCookie, err := doGeminiRequest(mc.generationContext(), endpoint, body, geminiHeaders, proxyURL, lineCB)
 		if err := mc.generationContext().Err(); err != nil {
 			return nil, err
@@ -391,9 +392,9 @@ func streamGenerateConvOnSlot(prompt string, mc ModelConfig, conv *convState,
 				logf("上游超时，retry_on_timeout 关着，不再重试: %v", err)
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
+			if attempt < attemptLimit-1 {
 				if errors.Is(err, errUpstreamFailureReply) {
-					logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, err)
+					logf("retry %d/%d: %v", attempt+1, attemptLimit, err)
 				}
 				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
 					return nil, err
@@ -407,8 +408,8 @@ func streamGenerateConvOnSlot(prompt string, mc ModelConfig, conv *convState,
 			if tracker.emitted != "" || rtracker.emitted != "" {
 				break
 			}
-			if attempt < rtCfg().RetryAttempts-1 {
-				logf("retry %d/%d: %v", attempt+1, rtCfg().RetryAttempts, lastErr)
+			if attempt < attemptLimit-1 {
+				logf("retry %d/%d: %v", attempt+1, attemptLimit, lastErr)
 				if err := waitForGenerationRetry(mc.generationContext(), time.Duration(rtCfg().RetryDelaySec)*time.Second); err != nil {
 					return nil, err
 				}
@@ -482,39 +483,53 @@ func callGeminiConv(messages []map[string]interface{}, mc ModelConfig,
 	exclude := map[int64]bool{}
 	var res *StreamResult
 	var err error
-	for try := 0; try < maxCookieTries; try++ {
-		if fresh {
-			conv = &convState{}
-			// 有 cookie 池就用登录号（能力更全），否则匿名（首轮就地拿 session cookie）。
-			// #20 匿名优先：模型不需要登录态时不占号（多轮已被 gate 限成无图无工具，附件
-			// 恒无，所以第二个参数传 false）。必须在调用前短路：挑号会更新
-			// last_used_at，调了不用等于白占一轮。
-			if !anonFirstEligible(mc, false) {
-				a, _, perr := pickAccountForModel(mc, exclude)
-				if perr != nil {
-					var last *ModelDowngradedError
-					if try > 0 && errors.As(err, &last) {
-						// 换号时已经没号可挑：报上一个号真实的降级，补上解冻时间
-						last.RetryAfter = perr.(*ModelDowngradedError).RetryAfter
-						break
+	fullPrompt, _ := messagesToPrompt(messages, tools, toolChoice)
+	res, err = validatedToolGeneration(mc, activeClientTools(tools, toolChoice) && !toolResultRestriction(messages), prompt, fullPrompt, onDelta, onReasoning,
+		func(prompt string, mc ModelConfig, corrective bool, onDelta, onReasoning func(string)) (*StreamResult, error) {
+			if corrective {
+				// Discard the advanced rejected head; retain account and preferred egress.
+				conv.cid, conv.rid, conv.rcid, conv.tok26 = "", "", "", ""
+				conv.turn = 0
+				res, err := runConversationTurn(prompt, mc, conv, onDelta, onReasoning)
+				// Keep real downgrade cooldowns, without rotating the bound account.
+				retryOnAnotherAccount(res, err, mc, exclude)
+				return res, err
+			}
+			for try := 0; try < maxCookieTries; try++ {
+				if fresh {
+					conv = &convState{}
+					// 有 cookie 池就用登录号（能力更全），否则匿名（首轮就地拿 session cookie）。
+					// #20 匿名优先：模型不需要登录态时不占号（多轮已被 gate 限成无图无工具，附件
+					// 恒无，所以第二个参数传 false）。必须在调用前短路：挑号会更新
+					// last_used_at，调了不用等于白占一轮。
+					if !anonFirstEligible(mc, false) {
+						a, _, perr := pickAccountForModel(mc, exclude)
+						if perr != nil {
+							var last *ModelDowngradedError
+							if try > 0 && errors.As(err, &last) {
+								// 换号时已经没号可挑：报上一个号真实的降级，补上解冻时间
+								last.RetryAfter = perr.(*ModelDowngradedError).RetryAfter
+								break
+							}
+							return &StreamResult{}, perr
+						}
+						if a != nil {
+							conv.cookie = a.Cookie
+							conv.sapisid = extractSAPISID(a.Cookie)
+							conv.isLogin = true
+							conv.accountID = a.ID
+							conv.authuser = a.AuthUser
+							conv.proxyID = a.ProxyID
+						}
 					}
-					return "", nil, &StreamResult{}, perr
 				}
-				if a != nil {
-					conv.cookie = a.Cookie
-					conv.sapisid = extractSAPISID(a.Cookie)
-					conv.isLogin = true
-					conv.accountID = a.ID
-					conv.authuser = a.AuthUser
-					conv.proxyID = a.ProxyID
+				res, err = runConversationTurn(prompt, mc, conv, onDelta, onReasoning)
+				if !retryOnAnotherAccount(res, err, mc, exclude) || !fresh {
+					break
 				}
 			}
-		}
-		res, err = runConversationTurn(prompt, mc, conv, onDelta, onReasoning)
-		if !retryOnAnotherAccount(res, err, mc, exclude) || !fresh {
-			break
-		}
-	}
+			return res, err
+		})
 	if err != nil {
 		// The old head was consumed before generation; an ambiguous failure must
 		// not restore it because the upstream may already have advanced.

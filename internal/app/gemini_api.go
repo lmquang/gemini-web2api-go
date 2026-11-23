@@ -521,7 +521,7 @@ func (g *geminiCall) run(onDelta, onReasoning func(string)) (string, []ToolCall,
 		return callGeminiConv(g.messages, g.modelCfg, g.tools, g.toolChoice, onDelta, onReasoning,
 			conversationOptions{requestScope: g.requestScope, normalizeToolIDs: true})
 	}
-	return callGemini(g.prompt, g.latest, g.modelCfg, g.tools, g.images, onDelta, onReasoning)
+	return callGeminiWithPolicy(g.prompt, g.latest, g.modelCfg, g.tools, g.images, onDelta, onReasoning, g.toolChoice, toolResultRestriction(g.messages))
 }
 
 // runGeminiCall 是调上游那一步，测试里替换成桩。

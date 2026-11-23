@@ -406,7 +406,7 @@ func wcParseStatus(p json.RawMessage) *wcStatusError {
 // doWebChannelRequest 走新协议发一次请求，返回值跟 doGeminiRequest 对齐：
 // (HTTP 状态, 老格式的 raw, TTFB 毫秒, Set-Cookie, err)。下行错误按 wcStatusError.httpStatus
 // 映射成状态码，body 是错误文本，让上层的重试和 cookie 健康度逻辑原样生效。
-func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error) (int, []byte, int64, []string, error) {
+func doWebChannelRequest(parent context.Context, r wcRequest, proxyURL string, onLine func(string) error) (int, []byte, int64, []string, error) {
 	sendAt := time.Now()
 	apiKey, err := webChannelAPIKey(proxyURL)
 	if err != nil {
@@ -416,7 +416,7 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 	if timeout <= 0 {
 		timeout = 300 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	var setCookie []string
@@ -597,6 +597,11 @@ func doWebChannelRequest(r wcRequest, proxyURL string, onLine func(string) error
 			if ev.Line != "" {
 				if ttfb < 0 {
 					ttfb = time.Since(sendAt).Milliseconds()
+				}
+				if budget, ok := ctx.Value(toolResponseBudgetKey{}).(*toolResponseBudget); ok && raw.Len()+len(ev.Line)+1 > toolWireLimit {
+					budget.exceeded = true
+					budget.cancel()
+					return 200, nil, ttfbOr(ttfb, sendAt), setCookie, &ToolContractError{Code: "tool_response_buffer_exceeded"}
 				}
 				raw.WriteString(ev.Line)
 				raw.WriteByte('\n')
