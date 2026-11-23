@@ -10,6 +10,11 @@ Main builds publish `main`, `latest`, and `sha-<full-commit-sha>` tags. The buil
 summary reports the immutable digest. Deploy by digest so mutable tags cannot
 change the running release unexpectedly.
 
+The GHCR package is public. Anonymous pull was verified from both the registry
+and the k3s cluster; this deployment does not need a GHCR pull secret. The first
+published release and its deployment checks are recorded in the
+[deployment record](false-tool-quota-deployment.md).
+
 `cookie/` is excluded from Git and Docker build context. Runtime databases,
 environment files, and the Git directory are also excluded from Docker context.
 Keep credentials in runtime secrets or private local files.
