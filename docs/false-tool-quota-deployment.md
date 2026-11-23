@@ -1,60 +1,81 @@
-# False tool quota recovery release candidate
+# False tool quota recovery deployment
 
-Status: prepared, not deployed. The bug remains OPEN. A fresh natural OpenCode
-walkthrough and implementation flow passed on authenticated Neon after an earlier
-attempt stopped on an actual upstream model downgrade. The original refusal has
-not been reproduced. See [verification evidence](false-tool-quota-recovery.md).
-Do not treat the image build or Kubernetes dry run as acceptance of the bug fix.
+Status: deployed to k3s with the user's explicit request. The bug remains OPEN;
+see [verification evidence](false-tool-quota-recovery.md). Image deployment and
+successful normal tool turns do not reproduce the original false refusal.
 
-## Candidate
+## Published image
 
-- Runtime source: commit `893576ee74e131126f0c6265e331bd0a8d5d210e`.
-- Build: repository production Dockerfile, clean Git archive of that commit.
-- Registry tag: `registry.chartify.xyz/gemini-web2api-go:quota-recovery-893576e`.
-- Immutable image: `registry.chartify.xyz/gemini-web2api-go@sha256:d290b1c1b67e57ff266d35e872f6a8290692d70c3eecd44b150d4d074abe94db`.
-- The image contains no local verification configuration, cookie export, private
-  captures, or database. The isolated Docker test mounts its own config and data.
+- Source commit: `39998bbf1ead829de3b9469f268b89210b1e9c1a` on `main`.
+- [Successful GitHub Actions run](https://github.com/lmquang/gemini-web2api-go/actions/runs/45198827423).
+- Checks: full Go race tests, `go vet`, and Linux amd64/arm64 container builds.
+- Public image: `ghcr.io/lmquang/gemini-web2api-go`.
+- Immutable deployed image: `ghcr.io/lmquang/gemini-web2api-go@sha256:280357072f055de3c8b9228917788934af4d7bc50ef7a6b11ec9665bcb52d26d`.
+- Registry labels confirm the source commit and repository. Anonymous registry
+  pull succeeded; a temporary cluster pod pulled the image and ran `--version`
+  successfully before rollout. The preflight pod was then deleted.
 
-The registry manifest was read back by digest. Kubernetes accepted an image-only
-server dry run. A subsequent live read still showed generation 6, one ready
-replica, and the original image. No rollout occurred.
+[CI configuration](cicd.md) describes future builds on main pushes. Runtime
+cookies, databases, environment files, and Git metadata are excluded from Docker
+context; `cookie/` is also ignored by Git.
 
-## Deployment scope
+The earlier local candidate built from `893576e`, published only to
+`registry.chartify.xyz`, was not the image deployed in this rollout. The GHCR
+build also includes the newer cookie-import changes merged from `origin/main`.
 
-The proposed change updates only container `gemini-web2api` in deployment
-`gemini-web2api`, namespace `gemini-bridge`, context `default`. It does not apply
-the whole historical manifest or alter 9Router, secrets, storage, or settings.
-Deployment requires explicit approval after review and the remaining live checks.
+## Deployment result
 
-The inspected deployment has one replica and uses `Recreate`. Deployment or
-rollback therefore causes a brief outage and loses the in-memory conversation
-cache. The SQLite volume persists. Cached session identity is not durable.
+The image-only update targeted context `default`, namespace `gemini-bridge`,
+deployment and container `gemini-web2api`. Generation advanced from 6 to 7.
+Rollout completed; pod `gemini-web2api-85ccbcdf99-xjwkl` was Ready with zero
+restarts. Its reported image ID matched the deployed GHCR digest.
 
-The inspected production settings differ from isolated verification:
-`strict_model=false`, `fallback_anon=true`, concurrency 5; the local checks use
-`strict_model=true`, `fallback_anon=false`, concurrency 1. Both use multi-turn
-and a 300 s request deadline. This image-only change preserves production
-settings. Local strict-Neon evidence does not prove all production fallback paths.
+A hash comparison confirmed the deployment spec, excluding container images,
+stayed unchanged. Admin config and `/v1/models` returned HTTP 200; the latter
+listed 22 models. Runtime settings matched the earlier production snapshot:
+`multi_turn=true`, `strict_model=false`, `fallback_anon=true`, `anon_first=false`,
+`web_channel=false`, timeout 300 s, concurrency 5, prompt limit 128000 bytes,
+and keepalive 0. These differ from strict isolated verification settings and
+were preserved during deployment.
 
-## Approved rollout commands
+SQLite storage, secrets, and 9Router were not changed. The source manifest at
+`re-agy/deploy/k3s/gemini-web2api.yaml` was updated only on its image line.
+The deployment uses one replica and `Recreate`; rollout briefly stops service
+and clears in-memory conversation heads. SQLite data persists.
 
-These commands are a review plan, not authorization to run them. Before applying,
-confirm that the deployment still uses the rollback image below and has no newer
-change. Recheck health, runtime flags, and active traffic before the outage.
+## Production tool smoke check
 
-```sh
-kubectl --context default -n gemini-bridge set image deployment/gemini-web2api \
-  gemini-web2api=registry.chartify.xyz/gemini-web2api-go@sha256:d290b1c1b67e57ff266d35e872f6a8290692d70c3eecd44b150d4d074abe94db
-kubectl --context default -n gemini-bridge rollout status deployment/gemini-web2api --timeout=180s
+A nonstreaming chat request supplied a single `read_file` client tool and asked
+for a verification code stored in a temporary file. The model did not receive
+that code in its prompt. The first response contained exactly one valid call
+for the permitted file. The client harness read the actual file, supplied the
+result using the returned tool-call ID, and required the exact code in the final
+answer with no further tool call. This check passed.
+
+The corresponding production request records were:
+
+| Request | Upstream model | Account | Status | Duration |
+| --- | --- | --- | --- | --- |
+| 64 | 4 Neon | 3 | 200 | 185.797 s |
+| 65 | 4 Neon | 3 | 200 | 23.994 s |
+
+Attribution used the sole new matching request record after each call; it did
+not infer the upstream model from the requested model name. Production settings
+stayed unchanged, including their existing fallback policy. This establishes an
+authenticated Neon tool-result continuation after rollout, not a live false-quota
+recovery or reproduction of the affected historical sessions. Private response
+captures and the structured verdict remain outside the repository.
+
+## Rollback
+
+The image immediately before this rollout was recorded as:
+
+```text
+registry.chartify.xyz/gemini-web2api-go@sha256:0d29123dde4ba18058673fc6a99db1f9d6e0b5667145a821814c59fda1670119
 ```
 
-After approval and rollout, verify the running image digest, readiness, unchanged
-runtime settings, authenticated model attribution, actual tool execution and a
-tool-result continuation. Report failures without enabling anonymous fallback
-or weakening model checks for the test. Keep model-prose refusals separate from
-real provider errors. Readiness alone does not establish recovery.
-
-Rollback to the image currently running at preparation time:
+If rollback is needed, first confirm no newer deployment superseded this one.
+Restore the image and the source manifest's image line together:
 
 ```sh
 kubectl --context default -n gemini-bridge set image deployment/gemini-web2api \
@@ -62,5 +83,5 @@ kubectl --context default -n gemini-bridge set image deployment/gemini-web2api \
 kubectl --context default -n gemini-bridge rollout status deployment/gemini-web2api --timeout=180s
 ```
 
-Rollback also uses `Recreate`; it cannot restore the old in-memory heads. Do not
-replace a newer deployment with this historical snapshot.
+Rollback also uses `Recreate`; it cannot restore prior in-memory conversation
+heads. Verify API health and unchanged runtime settings after any rollback.

@@ -364,5 +364,7 @@ TUI sequence encountered one transient upstream continuation failure, and one
 advanced-head fault-injection run encountered a real model downgrade. These
 failures remain part of the verification record despite the completed TUI fixture.
 
-Production and 9Router have not been changed. Production deployment requires
-approval after the concrete implementation and live evidence are reviewed.
+After these isolated checks, the user explicitly requested CI publishing and a
+k3s update. The GHCR image was deployed; see the [deployment record](false-tool-quota-deployment.md).
+Production runtime settings and 9Router were not changed. Deployment does not
+close the original-symptom replay gap.
