@@ -9,6 +9,7 @@ data/
 *.db-shm
 *.db-wal
 cookie.txt
+cookie/
 *.log
 tmp_*
 

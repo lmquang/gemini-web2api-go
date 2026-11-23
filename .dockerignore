@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+cookie/
+cookie.txt
+data/
+*.db
+*.db-shm
+*.db-wal
+*.log
+tmp_*
+gemini-web2api
+gemini-web2api-go

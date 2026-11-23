@@ -273,6 +273,86 @@ phase. Final admin checks confirmed concurrency 1, zero inflight requests,
 TUI remains open and idle for inspection. Private transcripts and a structured
 verification verdict remain in the temporary directory.
 
+## Natural walkthrough and implementation scenario
+
+After the user authorized OpenCode testing instead of supplying the missing
+history, a new isolated OpenCode v2.0.22 session
+`ses_df72e2fcdffeuAEgAlIMsDNfJP` tested the production Docker image built from
+commit `893576ee74e131126f0c6265e331bd0a8d5d210e`. This was a new scenario,
+not a replay of either affected historical session. A private loopback relay
+captured request bodies and responses without authorization headers.
+
+The fixture contained duplicated pricing calculations, protected behavior tests,
+and a passing baseline. The first prompt asked for a walkthrough and refactor
+plan without edits. The intended second prompt was `update the code as your plan`.
+Only the implementation file could be edited; the test command was explicitly
+allowed. Background title generation was disabled, concurrency stayed at 1,
+strict model checking stayed enabled, and anonymous fallback stayed disabled.
+
+The walkthrough failed before the second prompt could be sent:
+
+| Bridge request | Upstream model | Status | Duration | Result |
+| --- | --- | --- | --- | --- |
+| 29 | 4 Neon | 200 | 12.729 s | Actual client `read` completed |
+| 30 | 4 Hydrogen High | 429 | 57.742 s | Strict `model_downgraded` error |
+
+OpenCode returned to idle with outcome `failed`. All fixture files remained
+unchanged. Both captured requests still supplied four client tools. No false
+tool-exhaustion claim occurred, and no corrective attempt was established by
+this scenario. The upstream model mismatch does not establish why the provider
+changed models. The bridge preserved that real restriction rather than treating
+it as model prose or accepting another model. Private captures and the structured
+failure verdict remain outside the repository. This attempt did not reach the
+implementation phase; a later fresh-session attempt completed both phases below.
+
+Full offline tests and vet passed again during this verification. Production and 9Router
+were not changed.
+
+## Fresh-session walkthrough and implementation result
+
+At the user's request, a new session received exactly
+`walkthrough codebase and suggest to refactor`. The first fresh session
+`ses_df729ddbaffeYKntv6kSgCLWs8` failed immediately on the previous downgrade's
+in-memory account/model cooldown. It made no upstream request and executed no
+tools. It is not a successful Neon test.
+
+The isolated local bridge was restarted once to clear that cooldown and its
+conversation cache. No runtime flags changed. Another new OpenCode session,
+`ses_df7294f95ffekV9fssKnUpZuox`, received the same exact prompt with strict Neon,
+anonymous fallback disabled, concurrency 1, and the same protected pricing fixture.
+
+This session completed the full sequence:
+
+1. Actual `read` calls listed the fixture directory, read `pricing.py`, and read
+   `test_pricing.py`.
+2. The model returned a grounded walkthrough and proposed extracting the shared
+   subtotal and validation into a helper. The TUI returned to idle successfully.
+3. In the same session, the next user prompt was exactly
+   `update the code as your plan`.
+4. Actual `edit` changed `pricing.py`, extracting `_subtotal` and removing
+   duplicated validation while preserving both public functions.
+5. Actual `shell` ran `python3 test_pricing.py`; its tool result contained
+   `PLAN_IMPLEMENT_PASS`.
+6. The model returned a final answer and the TUI returned to idle successfully.
+
+Independent test execution passed. SHA-256 comparison confirmed the protected
+test and README stayed unchanged; only the implementation changed. The persisted
+tool states, actual file change, shell result, independent test, and terminal
+idle outcome establish completion together.
+
+All seven bridge requests (32–38) reported upstream `4 Neon`, account 2, and
+status 200. Durations were 42.325 s, 53.108 s, 177.713 s, 20.881 s, 92.601 s,
+66.134 s, and 15.981 s. Each captured request still supplied four client tools.
+The last three requests covered editing, test execution, and final confirmation.
+Private request/response captures, the full transcript, and a structured success
+verdict remain outside the repository.
+
+No false tool-exhaustion claim occurred in this successful session. It establishes
+a natural multi-turn OpenCode coding flow on the release image, not a reproduction
+of the original refusal or a live exercise of corrective recovery. The original
+downgrade and cooldown failures remain part of the record. Production and 9Router
+were not changed.
+
 ## Remaining verification gaps
 
 The affected history fixture and original-symptom replay with actual tool results
